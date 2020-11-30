@@ -14,6 +14,25 @@ vma：虚拟用户空间
 area：虚拟内核空间
 *flip*: binder的文件描述符 
 
+ProcessState::self().startThreadPool();
+ProcessState::self():
+`inti(kDefaultDriver,bool)`
+
+`mDriver(open_driver(const char* driver))`
+```cpp
+#ifdef __ANDROID_VNDK__
+const char* kDefaultDriver = "/dev/vndbinder";
+#else
+const char* kDefaultDriver = "/dev/binder";
+#endif
+```
+
+IPCThreadState::self().joinThreadPool(bool isMain):
+```cpp
+	do{result = getAndExecuteCommand()}while(not bad resutl)
+```
+executeCommand(cmd);
+
 在内核虚拟地址空间申请与vma大小相同的内存area(不超过4M):
 `area = get_vm_area(vma->vm_end - vma->vm_start, VM_IOREMAP);`
 
@@ -45,7 +64,32 @@ area：虚拟内核空间
 
 ####IPCThreadState::transact():
 
-####IPCThreadState::writeTransactionData(): ***binder_transaction_data***
+####IPCThreadState::writeTransactionData(): 
+***binder_transaction_data***
+```cpp
+struct binder_transaction_data {
+    union {
+        __u32    handle;       //binder_ref（即handle）
+        binder_uintptr_t ptr;     //Binder_node的内存地址
+    } target;  //RPC目标
+    binder_uintptr_t    cookie;    //BBinder指针
+    __u32        code;        //RPC代码，代表Client与Server双方约定的命令码
+
+    __u32            flags; //标志位，比如TF_ONE_WAY代表异步，即不等待Server端回复
+    pid_t        sender_pid;  //发送端进程的pid
+    uid_t        sender_euid; //发送端进程的uid
+    binder_size_t    data_size;    //data数据的总大小
+    binder_size_t    offsets_size; //IPC对象的大小
+
+    union {
+        struct {
+            binder_uintptr_t    buffer; //数据区起始地址
+            binder_uintptr_t    offsets; //数据区IPC对象偏移量
+        } ptr;
+        __u8    buf[8];
+    } data;   //RPC数据
+}
+```
 ```cpp
     binder_transaction_data tr;
     tr.target.ptr = 0; 
@@ -59,7 +103,8 @@ area：虚拟内核空间
     mOut.writeInt32(cmd);
     mOut.write(&tr, sizeof(tr));
 ```
-####IPCThreadState::waitForResponse():
+
+####IPCThreadState::waitForResponse(): ***BR_XXX***
 ```cpp
 status_t IPCThreadState::waitForResponse(Parcel *reply, status_t *acquireResult)
 {
@@ -159,8 +204,87 @@ finish:
 
 talkWithDriver(): ***binder_write_read*** bwr
 先将bwr读完 再写
+```cpp
+status_t IPCThreadState::talkWithDriver(bool doReceive)
+{
+    if (mProcess->mDriverFD < 0) {
+        return -EBADF;
+    }
 
-ioctl:
+    binder_write_read bwr;
+
+    // Is the read buffer empty?
+    const bool needRead = mIn.dataPosition() >= mIn.dataSize();
+
+    // We don't want to write anything if we are still reading
+    // from data left in the input buffer and the caller
+    // has requested to read the next data.
+    const size_t outAvail = (!doReceive || needRead) ? mOut.dataSize() : 0;
+
+    bwr.write_size = outAvail;
+    bwr.write_buffer = (uintptr_t)mOut.data();
+
+    // This is what we'll read.
+    if (doReceive && needRead) {
+        bwr.read_size = mIn.dataCapacity();
+        bwr.read_buffer = (uintptr_t)mIn.data();
+    } else {
+        bwr.read_size = 0;
+        bwr.read_buffer = 0;
+    }
+
+    // Return immediately if there is nothing to do.
+    if ((bwr.write_size == 0) && (bwr.read_size == 0)) return NO_ERROR;
+
+    bwr.write_consumed = 0;
+    bwr.read_consumed = 0;
+    status_t err;
+    do {
+        IF_LOG_COMMANDS() {
+            alog << "About to read/write, write size = " << mOut.dataSize() << endl;
+        }
+#if defined(__ANDROID__)
+        if (ioctl(mProcess->mDriverFD, BINDER_WRITE_READ, &bwr) >= 0)
+            err = NO_ERROR;
+        else
+            err = -errno;
+#else
+        err = INVALID_OPERATION;
+#endif
+        if (mProcess->mDriverFD < 0) {
+            err = -EBADF;
+        }
+        IF_LOG_COMMANDS() {
+            alog << "Finished read/write, write size = " << mOut.dataSize() << endl;
+        }
+    } while (err == -EINTR);
+
+    if (err >= NO_ERROR) {
+        if (bwr.write_consumed > 0) {
+            if (bwr.write_consumed < mOut.dataSize())
+                LOG_ALWAYS_FATAL("Driver did not consume write buffer. "
+                                 "err: %s consumed: %zu of %zu",
+                                 statusToString(err).c_str(),
+                                 (size_t)bwr.write_consumed,
+                                 mOut.dataSize());
+            else {
+                mOut.setDataSize(0);
+                processPostWriteDerefs();
+            }
+        }
+        if (bwr.read_consumed > 0) {
+            mIn.setDataSize(bwr.read_consumed);
+            mIn.setDataPosition(0);
+        }
+
+        return NO_ERROR;
+    }
+
+    return err;
+}
+```
+
+ioctl(fd,cmd,&data):
 
 [binder.c源码](https://android.googlesource.com/kernel/arm64/+/refs/heads/android-amber-intel-linux-4.7-android10/drivers/android/binder.c)
 
@@ -172,7 +296,7 @@ binder_ioctl:
 >BINDER_VERISION,
 >BINDER_THREAD_EXIT 
 
-binder_ioctl_write_read:
+binder_ioctl_write_read（file*,int cmd,long arg,binder_thread thread）:
 
 ```cpp
     if (copy_from_user(&bwr, ubuf, sizeof(bwr))) { //把用户空间数据ubuf拷贝到bwr
@@ -211,13 +335,77 @@ binder_ioctl_write_read:
     }
 
 ```
-binder_thread_write:
+binder_thread_write: ***BC_XXX***
 >BC_INCREFS BC_ACQUIRE BC_RELEASE BC_DECREFS
 `copy_from_user(&tr, ptr, sizeof(tr))；`
-binder_thread_read:
 
-binder_transaction():  ***binder_transaction***
+binder_thread_read: 
+***binder_work***
+```cpp
+struct binder_work {
+    struct list_head entry;
+    enum {
+        BINDER_WORK_TRANSACTION = 1, 
+        BINDER_WORK_TRANSACTION_COMPLETE,
+        BINDER_WORK_NODE, 
+        BINDER_WORK_DEAD_BINDER, 
+        BINDER_WORK_DEAD_BINDER_AND_CLEAR, 
+        BINDER_WORK_CLEAR_DEATH_NOTIFICATION,
+    } type;
+};
+```
 
+binder_transaction():  
+***binder_transaction***
+```cpp
+struct binder_transaction {
+	int debug_id;
+	struct binder_work work;
+	struct binder_thread *from;
+	struct binder_transaction *from_parent;
+	struct binder_proc *to_proc;
+	struct binder_thread *to_thread;
+	struct binder_transaction *to_parent;
+	unsigned need_reply:1;
+	/* unsigned is_dead:1; */	/* not used at the moment */
+	struct binder_buffer *buffer;
+	unsigned int	code;
+	unsigned int	flags;
+	long	priority;
+	long	saved_priority;
+	kuid_t	sender_euid;
+};
+```
+***binder_buffer***
+```cpp
+struct binder_buffer {
+	struct list_head entry; /* free and allocated entries by address */
+	struct rb_node rb_node; /* free entry by size or allocated entry */
+				/* by address */
+	unsigned free:1;
+	unsigned allow_user_free:1;
+	unsigned async_transaction:1;
+	unsigned debug_id:29;
+	struct binder_transaction *transaction;
+	struct binder_node *target_node;
+	size_t data_size;
+	size_t offsets_size;
+	uint8_t data[0];
+};
+```
+***flat_binder_object***
+type:
+```cpp
+enum{
+	BINDER_TYPE_BINDER,
+	BINDER_TYPE_HANDLE,
+	BINDER_TYPE_WEAK_BINDER,
+	BINDER_TYPE_WEAK_HANDLE,
+
+	/*int fileDescription in parcel*/
+	BINDER_TYPE_FD
+}
+```
 ```cpp
 static void binder_transaction(struct binder_proc *proc,
 			       struct binder_thread *thread,
