@@ -18,7 +18,7 @@ ProcessState::self().startThreadPool();
 ProcessState::self():
 `inti(kDefaultDriver,bool)`
 
-`mDriver(open_driver(const char* driver))`
+`ProcessState(const char* driver):mDriver(open_driver(const char* driver))`
 ```cpp
 #ifdef __ANDROID_VNDK__
 const char* kDefaultDriver = "/dev/vndbinder";
@@ -60,10 +60,26 @@ executeCommand(cmd);
     }
 ```
 
+Cient 收到BR_TRANSACTION 会通过 BBinder.transact()回调 BBbinder.onTransact()
+```cpp
+	if (tr.target.ptr) {
+		// We only have a weak reference on the target object, so we must first try to
+		// safely acquire a strong reference before doing anything else with it.
+		if (reinterpret_cast<RefBase::weakref_type*>(
+				tr.target.ptr)->attemptIncStrong(this)) {
+			error = reinterpret_cast<BBinder*>(tr.cookie)->transact(tr.code, buffer,
+					&reply, tr.flags);
+			reinterpret_cast<BBinder*>(tr.cookie)->decStrong(this);
+		} else {
+			error = UNKNOWN_TRANSACTION;
+		}
+	}
+```
+
 ####BpBinder::transact():
 
 ####IPCThreadState::transact():
-
+![alt 一次完整的binder通信过程](../Images/binder_transaction_ipc.jpg)
 ####IPCThreadState::writeTransactionData(): 
 ***binder_transaction_data***
 ```cpp
