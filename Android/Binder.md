@@ -7,8 +7,22 @@
 
 1. *binder_proc*
 1. *binder_work*
+2. *binder_node*
+3. *binder_ref*
+4. *binder_ref_death*
+5. *binder_write_read*
+6. *binder_transaction_data*
+7. *flat_binder_object*
+8. *binder_buffer*
+9. *binder_transaction*
+10. *binder_work*
+11. *binder_state*
+[binder.c源码](https://android.googlesource.com/kernel/arm64/+/refs/heads/android-amber-intel-linux-4.7-android10/drivers/android/binder.c)
 
-
+[handle,code,parcel]
+[cmd = BC_XXX,binder_transaction_data = [handle,code,cookie]] --> mOut
+[flip,cmd = BINDER_WRITE_READ,&bwr = mIn,mOut]
+[proc,thread,bwr_buffer,bwr_size,bwr_consume]
 ###binder原理
 vma：虚拟用户空间
 area：虚拟内核空间
@@ -60,7 +74,7 @@ executeCommand(cmd);
     }
 ```
 
-Cient 收到BR_TRANSACTION 会通过 BBinder.transact()回调 BBbinder.onTransact()
+Server 收到BR_TRANSACTION 会通过 BBinder.transact()回调 BBbinder.onTransact()
 ```cpp
 	if (tr.target.ptr) {
 		// We only have a weak reference on the target object, so we must first try to
@@ -301,8 +315,6 @@ status_t IPCThreadState::talkWithDriver(bool doReceive)
 ```
 
 ioctl(fd,cmd,&data):
-
-[binder.c源码](https://android.googlesource.com/kernel/arm64/+/refs/heads/android-amber-intel-linux-4.7-android10/drivers/android/binder.c)
 
 binder_ioctl:
 
